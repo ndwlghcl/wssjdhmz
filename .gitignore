@@ -1,0 +1,21 @@
+# 环境变量与密钥
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# IDE
+.idea/
+.vscode/
+
+# 缓存与生成文件
+*.pkl
+.embedding_cache.pkl
+.pytest_cache/
