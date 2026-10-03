@@ -92,7 +92,13 @@ class ReActAgent(Agent):
         for step in range(1, self.max_steps + 1):
             print(f"\n--- 第 {step} 步 ---")
 
-            message = self.llm.chat(self.messages, tools=tools, temperature=0)
+            # with_retry 重试用尽后异常抛到这里（模型挂了没有"喂回错误"的通道，
+            # 只能放弃本轮如实告知；永久错误如 401 不重试，直接到这里）
+            try:
+                message = self.llm.chat(self.messages, tools=tools, temperature=0)
+            except Exception as e:
+                print(f"\n⚠️ 模型调用失败: {type(e).__name__}: {e}")
+                return "抱歉，模型调用失败，请稍后再试。"
 
             # 没有工具调用 → 模型的 content 就是最终答案
             if not message.tool_calls:
@@ -119,8 +125,21 @@ class ReActAgent(Agent):
                     continue
 
                 print(f"🔧 调用工具: {name}，参数: {args}")
-                # execute_tool 内部已做"临时错误重试 + 永久错误兜底"，且保证不抛异常，
-                # 所以这里直接拿返回值即可，返回值一定是字符串（正常结果或错误说明）
+                # bind 校验：对照工具 schema 查缺参/多参/类型错。
+                # json.loads 只保证"是合法 JSON"，参数对不对要靠这里；
+                # 校验错误和参数解析失败一样，当作 tool 消息喂回模型自己纠正
+                error = self.tool_executor.validate_args(name, args)
+                if error:
+                    print(f"⛔ {error}")
+                    self.messages.append({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": error,
+                    })
+                    continue
+                # 走到这里参数已通过校验。execute_tool 内部已做"临时错误重试 +
+                # 永久错误兜底"，且保证不抛异常，所以直接拿返回值即可，
+                # 返回值一定是字符串（正常结果或错误说明）
                 result = self.tool_executor.execute_tool(name, **args)
                 # 存入历史前对超长观察结果截断，避免多轮对话后历史 token 无限膨胀
                 obs = self._clip_observation(str(result))

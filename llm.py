@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from typing import List, Dict, Any
 
 from config import Config
+from retry import with_retry
 
 # 加载 .env 文件中的环境变量
 load_dotenv()
@@ -31,9 +32,14 @@ class LLM:
 
     def chat(self, messages: List[Dict[str, str]], **kwargs):
         """调用模型，返回原始的 message 对象（含 content 和 tool_calls）。
-        需要处理工具调用时必须用这个方法，因为 tool_calls 不在 content 里"""
-        response = self.client.chat.completions.create(
-            model=self.model, messages=messages, **kwargs
+        需要处理工具调用时必须用这个方法，因为 tool_calls 不在 content 里。
+        临时性错误自动退避重试；重试用尽向上抛出——模型挂了没有"把错误喂回模型"的
+        通道，只能让调用方（Agent 循环）兜底，这点和工具层"永不抛异常"正好相反"""
+        response = with_retry(
+            lambda: self.client.chat.completions.create(
+                model=self.model, messages=messages, **kwargs
+            ),
+            what="chat",
         )
         return response.choices[0].message
 
@@ -42,13 +48,27 @@ class LLM:
         return self.chat(messages, **kwargs).content
 
     def stream(self, messages: List[Dict[str, str]], **kwargs):
-        response = self.client.chat.completions.create(
-            model=self.model, messages=messages, stream=True, **kwargs
+        response = with_retry(
+            lambda: self.client.chat.completions.create(
+                model=self.model, messages=messages, stream=True, **kwargs
+            ),
+            what="stream",
         )
 
         for chunk in response:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
+
+    def embed(self, input: str | list[str]):
+        """把文字转成向量，input 可以是单条 str 或批量 list[str]，返回原始响应。
+        embedding 同样是网络调用，会超时/限流，所以和 chat 走同一个重试引擎。
+        （之前 RAG_tool 直接裸用 llm.client.embeddings，重试罩不到这里）"""
+        return with_retry(
+            lambda: self.client.embeddings.create(
+                model=self.config.embedding_model, input=input
+            ),
+            what="embedding",
+        )
 
 
 if __name__=='__main__':

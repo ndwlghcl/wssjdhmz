@@ -1,6 +1,7 @@
 import hashlib
 import pickle
 from pathlib import Path
+from typing import Annotated
 
 from chunking_test import chunking
 from config import Config
@@ -10,7 +11,6 @@ from tool import tool
 
 # 只创建一个 LLM 客户端，全局复用
 config = Config.from_env()
-EMBEDDING_MODEL = config.embedding_model
 llm = LLM(config=config)
 
 # 向量索引的磁盘缓存文件（和脚本同目录）
@@ -34,7 +34,7 @@ def build_store(documents: list, batch_size: int = 10) -> list:
     for i in range(0, len(documents), batch_size):
         batch = documents[i:i + batch_size]              # 每批最多 batch_size 个 Document
         texts = [d.page_content for d in batch]          # Document -> str
-        resp = llm.client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
+        resp = llm.embed(texts)   # 走 LLM.embed，临时错误自动重试
         # 按顺序把这一批的结果拼回 store，metadata 一起带上
         for d, item in zip(batch, resp.data):
             store.append({
@@ -47,7 +47,7 @@ def build_store(documents: list, batch_size: int = 10) -> list:
 
 def embed(text: str) -> list:
     """把一段文字转成向量"""
-    resp = llm.client.embeddings.create(model=EMBEDDING_MODEL, input=[text])
+    resp = llm.embed([text])
     return resp.data[0].embedding
 
 
@@ -55,7 +55,7 @@ def _docs_fingerprint(documents: list) -> str:
     """根据所有文档的正文 + metadata 算一个指纹。
     文档内容或来源/章节一旦变化，指纹就变，用来判断磁盘缓存是否失效。"""
     h = hashlib.sha256()
-    h.update(EMBEDDING_MODEL.encode("utf-8"))
+    h.update(config.embedding_model.encode("utf-8"))
     for d in documents:
         h.update(d.page_content.encode("utf-8"))
         h.update(repr(sorted(d.metadata.items())).encode("utf-8"))
@@ -107,7 +107,10 @@ SIM_THRESHOLD = 0.5
 
 
 @tool(name="retrieval", description="根据问题检索本地知识库。输入应该是一个问题，返回最相关的资料片段")
-def retrieval(input: str, top_k: int = 4) -> str:
+def retrieval(
+    input: Annotated[str, "要检索的问题，必须是一句完整的问句，不要只给关键词"],
+    top_k: Annotated[int, "返回的资料片段数量，默认 4，一般无需修改"] = 4,
+) -> str:
     store = get_store()               # D：用到时才确保索引已就绪
     q_embedding = embed(input)
 
