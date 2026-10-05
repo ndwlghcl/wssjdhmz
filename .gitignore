@@ -17,5 +17,5 @@ dist/
 
 # 缓存与生成文件
 *.pkl
-.embedding_cache.pkl
+.embedding_cache.json
 .pytest_cache/

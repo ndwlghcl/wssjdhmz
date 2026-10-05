@@ -1,5 +1,5 @@
 import hashlib
-import pickle
+import json
 from pathlib import Path
 from typing import Annotated
 
@@ -14,7 +14,9 @@ config = Config.from_env()
 llm = LLM(config=config)
 
 # 向量索引的磁盘缓存文件（和脚本同目录）
-CACHE_FILE = Path(__file__).parent / ".embedding_cache.pkl"
+# 用 JSON 而非 pickle：store 是纯数据（字典/字符串/浮点），明文可调试、
+# 且加载是纯解析，缓存文件被篡改也不可能执行代码
+CACHE_FILE = Path(__file__).parent / ".embedding_cache.json"
 
 # 读取并切分文档（只读文件+切分，不调用 API，放在 import 阶段没问题）
 DOCUMENTS = chunking()
@@ -80,8 +82,9 @@ def get_store() -> list:
     # 1) 先尝试从磁盘加载缓存
     if CACHE_FILE.exists():
         try:
-            with open(CACHE_FILE, "rb") as f:
-                cached = pickle.load(f)
+            # encoding 必须显式：Windows 文本模式默认 GBK，中文内容读写都会炸
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                cached = json.load(f)
             if cached.get("fingerprint") == fingerprint:
                 print("✅ 已从磁盘缓存加载向量索引（未重新调用 embedding）")
                 _STORE = cached["store"]
@@ -93,8 +96,9 @@ def get_store() -> list:
     # 2) 缓存不可用或已失效 → 重新构建，并存盘
     _STORE = build_store(DOCUMENTS)
     try:
-        with open(CACHE_FILE, "wb") as f:
-            pickle.dump({"fingerprint": fingerprint, "store": _STORE}, f)
+        # ensure_ascii=False：中文保持原样，不转 \uXXXX（否则文件更大更不可读）
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"fingerprint": fingerprint, "store": _STORE}, f, ensure_ascii=False)
         print("💾 向量索引已保存到磁盘缓存")
     except Exception as e:
         print(f"⚠️ 缓存写入失败（不影响本次使用）：{e}")
