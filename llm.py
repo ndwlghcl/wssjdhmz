@@ -1,6 +1,7 @@
 
 from os import getenv
 
+import requests
 from openai import OpenAI
 from dotenv import load_dotenv
 from typing import List, Dict, Any
@@ -69,6 +70,25 @@ class LLM:
             ),
             what="embedding",
         )
+
+    def rerank(self, query: str, documents: list[str], top_n: int = 5) -> list[dict]:
+        """调用排序模型，返回 [{"index": i, "relevance_score": s}, ...]（按分数降序）。
+        rerank 是 DashScope 私有协议（OpenAI 协议里没有这个端点），所以用 requests 直发，
+        不走 self.client；用 json= 时 Content-Type 会自动设置，不用手写"""
+        def call():
+            resp = requests.post(
+                self.config.rerank_model_url,
+                headers={"Authorization": f"Bearer {self.config.api_key}"},
+                json={
+                    "model": self.config.rerank_model,
+                    "input": {"query": query, "documents": documents},
+                    "parameters": {"top_n": top_n},
+                },
+                timeout=self.config.request_timeout,
+            )
+            resp.raise_for_status()      # 关键：requests 默认对 4xx/5xx 不报错，不主动抛就永远静默失败
+            return resp.json()["output"]["results"]   # 结果在 output.results 里，不是顶层
+        return with_retry(call, what="rerank")
 
 
 if __name__=='__main__':

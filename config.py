@@ -12,6 +12,9 @@ class Config(BaseModel):
     max_tokens: Optional[int]
     embedding_model: str
     max_obs_tokens: int
+    rerank_model: str
+    rerank_model_url: str
+    request_timeout: int
 
     # 系统配置
     debug: bool = False
@@ -33,9 +36,13 @@ class Config(BaseModel):
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             temperature=float(os.getenv("TEMPERATURE", "0.7")),
             max_tokens=int(os.getenv("MAX_TOKENS")) if os.getenv("MAX_TOKENS") else None,
-            embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-v3"),
+            embedding_model=os.getenv("EMBEDDING_MODEL_ID", "text-embedding-v3"),
             max_history_length=int(os.getenv("MAX_HISTORY_LENGTH", "100")),
             max_obs_tokens=int(os.getenv("MAX_OBS_TOKENS", "1000")),
+
+            rerank_model=os.getenv("RERANK_MODEL_ID", "qwen3.7-text-rerank"),
+            rerank_model_url=os.getenv("RERANK_MODEL_URL", "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"),
+            request_timeout=int(os.getenv("REQUEST_TIMEOUT", "30")),
         )
 
     def to_dict(self) -> Dict[str, Any]:

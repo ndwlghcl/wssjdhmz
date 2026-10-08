@@ -178,14 +178,9 @@ def retrieval(
         return "知识库中没有找到与问题相关的内容。"
 
     # ④ 拼输出：带上来源和分数（现在是 rerank 分数），模型才能引用
-    # 章节回退：有些块直接在 h1 之下（不在任何 ## 小节里），此时用 h3 或"引言"顶上，
-    # 避免引用信息出现空白
-    def _section(m: dict) -> str:
-        return m.get("h2") or m.get("h3") or "引言"
-
     return "\n\n".join(
         f"[来源 {item['metadata'].get('source', '')} | "
-        f"章节 {item['metadata'].get('h1', '')} > {_section(item['metadata'])}] "
+        f"章节 {item['metadata'].get('h1', '')} > {item['metadata'].get('h2', '')}] "
         f"[相关度 {score:.2f}]\n{item['text']}"
         for score, item in picked
     )

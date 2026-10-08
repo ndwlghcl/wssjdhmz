@@ -306,7 +306,91 @@ def execute_tool(self, name: str, **kwargs):
 
 ---
 
-## 七、工程经验小结
+## 七、Rerank：给检索加一层"精排"
+
+### 7.1 为什么需要 rerank：两个模型家族
+
+| | 双塔 bi-encoder（向量检索）| 交叉编码 cross-encoder（rerank）|
+|---|---|---|
+| 输入 | query 和文档**各自独立**编码 | query + 文档**拼在一起**送进模型 |
+| 能否预计算 | ✅ 文档向量可离线算好 | ❌ 每个 (query, 文档) 组合都要现算 |
+| 精度 | 一般（只比向量"像不像"）| 高（真的读了内容，判断"答不答这个问题"）|
+| 用在哪 | 从全库**召回**（粗筛：宁多勿漏）| 对少量候选**精排**（宁准勿滥）|
+
+标准两阶段：`向量召回 top 20~50 → rerank 精排 top 3~5 → 喂给大模型`。
+
+### 7.2 百炼 Rerank API 参考
+
+**支持的模型**（2026-09 官方文档）：
+
+| 模型 | 单条上限 | 最大文档数 | 备注 |
+|---|---|---|---|
+| `qwen3.7-text-rerank` | 30k token | 500 | 支持 `instruct` 定制排序目标 |
+| `qwen3-rerank` | 4k token | 500 | 走 OpenAI **兼容风格**端点（仍是自定义路径）|
+| `gte-rerank-v2` | 30k token | — | 支持 `return_documents` |
+| `qwen3-vl-rerank` | 8k token | 100 | 多模态（图片/视频）|
+
+⚠️ `gte-rerank`（v1）已于 2026-05-30 下线，不要用。
+
+**端点与认证**（**不是** OpenAI 协议——OpenAI 根本没有 rerank 端点）：
+
+```
+POST https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank
+Authorization: Bearer sk-xxx        （和 chat / embedding 用的是同一个 key）
+```
+
+**请求体**（嵌套式结构）：
+
+```json
+{
+  "model": "gte-rerank-v2",
+  "input": {"query": "问题", "documents": ["文档1", "文档2"]},
+  "parameters": {"top_n": 5}
+}
+```
+
+`parameters` 可选字段：
+
+| 字段 | 说明 | 限制 |
+|---|---|---|
+| `top_n` | 返回排序后的前 N 条 | 默认返回全部 |
+| `return_documents` | 是否在结果里带回原文 | **仅 `gte-rerank-v2` / `qwen3-vl-rerank` 支持** |
+| `instruct` | 定制排序目标（问答检索 / 语义相似）| 仅 qwen 系列生效，建议英文 |
+
+**响应体**：
+
+```json
+{
+  "output": {"results": [
+    {"index": 0, "relevance_score": 0.93, "document": {"text": "..."}}
+  ]},
+  "usage": {"total_tokens": 79},
+  "request_id": "..."
+}
+```
+
+- **`index`** = 该结果对应**输入 `documents` 列表里的原始位置** → 靠它映射回自己的数据（metadata 在你这侧）
+- **`relevance_score`** 取值 0~1，但**是"当前请求内的相对分数"，不能跨请求当绝对值比较**
+- `results` 已按 `relevance_score` 降序排列；注意它在 **`output` 里面**，不在顶层
+
+**用 requests 发时必须做的两个防护**：
+
+```python
+resp = requests.post(URL, headers=HEADERS, json=PAYLOAD, timeout=30)
+resp.raise_for_status()    # requests 默认对 4xx/5xx 不抛异常 → 不加就是静默失败
+```
+
+失败响应形如：`{"code": "InvalidApiKey", "message": "...", "request_id": "..."}`
+
+### 7.3 本项目落地方式
+
+- **收口**：`llm.rerank()` 管协议与重试；`retrieval` 管业务（粗筛 20 → 精排 4 → 用 `index` 映射回 metadata）
+- **阈值实测**：余弦 相关≥0.589 / 无关≤0.260 → 取 0.4；rerank 相关≥0.571 / 无关≤0.292 → 取 0.4
+- **效果与踩的坑**：见《设计演进与踩坑笔记》2.8 / 3.7 / 3.8
+
+---
+
+## 八、工程经验小结
 
 1. **验证代码本身也会错**：第一版 overlap 检测用 `prev[-40:]` 窗口，漏判了 overlap=60 的真实重叠区，得出"20 和 60 没区别"的错误结论。修正为"计算 prev 后缀与 curr 前缀的最长公共重合"后真相才浮现。**当实验结果与预期矛盾时，先怀疑测量方法。**
 
