@@ -1,7 +1,10 @@
 import os
 from typing import Optional, Dict, Any
+
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
+load_dotenv()
 
 class Config(BaseModel):
     default_model: str

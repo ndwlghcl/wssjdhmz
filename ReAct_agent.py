@@ -21,10 +21,12 @@ SYSTEM_PROMPT = """你是一个可以使用工具的智能助手。
 
 class ReActAgent(Agent):
 
-    def __init__(self, name: str, config: Config | None = None):
+    def __init__(self, name: str, config: Config | None = None,llm:LLM|None=None):
         if config is None:
             config = Config.from_env()
-        llm = LLM(config=config)
+
+        if llm is None:
+            llm = LLM(config=config)
 
         super().__init__(name, llm, system_prompt=SYSTEM_PROMPT, config=config)
         self.tool_executor = ToolExecutor()
@@ -33,7 +35,7 @@ class ReActAgent(Agent):
         self.max_steps = 5
 
         # 对话历史：全部用字典存（便于裁剪、序列化，也不会夹带 reasoning_content 之类的私有字段）
-        self.messages: list[dict] = [{"role": "system", "content": self.system_prompt}]
+        # self.messages: list[dict] = [{"role": "system", "content": self.system_prompt}]
 
     def _trim_history(self):
         """裁剪历史。两条策略：
@@ -83,11 +85,19 @@ class ReActAgent(Agent):
             return text[:limit] + f"…（已截断，原长 {len(text)} 字）"
         return text
 
+    # def clear_history(self):
+    #     self.messages = [{"role": "system", "content": self.system_prompt}]
+    #
+    # def get_history(self):
+    #     return self.messages
+
     def run(self, input_text: str) -> str:
         self._trim_history()
         self.messages.append({"role": "user", "content": input_text})
 
         tools = self.tool_executor.get_tools_schema()
+
+        retrieval_count = 0
 
         for step in range(1, self.max_steps + 1):
             print(f"\n--- 第 {step} 步 ---")
@@ -140,6 +150,15 @@ class ReActAgent(Agent):
                 # 走到这里参数已通过校验。execute_tool 内部已做"临时错误重试 +
                 # 永久错误兜底"，且保证不抛异常，所以直接拿返回值即可，
                 # 返回值一定是字符串（正常结果或错误说明）
+                if name == "retrieval":
+                    retrieval_count += 1
+                    if retrieval_count > 2:
+                        self.messages.append({
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": "本轮检索次数已用尽",
+                        })
+                        continue
                 result = self.tool_executor.execute_tool(name, **args)
                 # 存入历史前对超长观察结果截断，避免多轮对话后历史 token 无限膨胀
                 obs = self._clip_observation(str(result))
@@ -156,10 +175,14 @@ class ReActAgent(Agent):
 
 if __name__ == "__main__":
     agent = ReActAgent(name="ReAct助手")
-    print("输入 exit 退出")
-    while True:
-        question = input("\n你: ")
-        if question.strip().lower() in ("exit", "quit", "退出"):
-            break
-        print("助手: ", end="")
-        agent.run(question)
+    agent.add_message({"role": "user", "content": "测试消息"})
+    print([m["role"] for m in agent.get_history()])
+    agent.clear_history()
+    print([m["role"] for m in agent.get_history()])
+    # print("输入 exit 退出")
+    # while True:
+    #     question = input("\n你: ")
+    #     if question.strip().lower() in ("exit", "quit", "退出"):
+    #         break
+    #     print("助手: ", end="")
+    #     agent.run(question)

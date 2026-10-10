@@ -3,7 +3,7 @@ from openai import OpenAI
 from typing import List, Dict, Any
 
 from config import Config
-from retry import TRANSIENT_REQUESTS_EXCEPTIONS, with_retry
+from retry import with_retry
 
 
 class LLM:
@@ -80,20 +80,9 @@ class LLM:
                 },
                 timeout=self.config.request_timeout,
             )
-            # requests 默认对 4xx/5xx 都不报错，必须自己判状态码——而且要分开判：
-            #   5xx：服务端临时故障 → raise_for_status 抛 HTTPError，交给 with_retry 退避重试
-            #   4xx：永久错误（参数非法 / 认证失败）→ 抛 ValueError 直接放行，重试没有意义
-            # （原来只有一句 raise_for_status()：4xx/5xx 混在一起，而且它抛出的 HTTPError
-            #   根本不在 TRANSIENT_EXCEPTIONS 里 → 外层那层重试一次都不会触发）
-            if resp.status_code >= 500:
-                resp.raise_for_status()
-            elif resp.status_code >= 400:
-                raise ValueError(
-                    f"rerank 请求被拒（HTTP {resp.status_code}）: {resp.text[:200]}"
-                )
+            resp.raise_for_status()      # 关键：requests 默认对 4xx/5xx 不报错，不主动抛就永远静默失败
             return resp.json()["output"]["results"]   # 结果在 output.results 里，不是顶层
-        # 显式声明"这次的临时错误长什么样"——rerank 走 requests，不认识 openai 的异常类
-        return with_retry(call, what="rerank", exceptions=TRANSIENT_REQUESTS_EXCEPTIONS)
+        return with_retry(call, what="rerank")
 
 
 if __name__=='__main__':

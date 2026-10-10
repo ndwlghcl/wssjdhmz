@@ -1,4 +1,4 @@
-from retry import TRANSIENT_EXCEPTIONS, with_retry
+from retry import ALL_TRANSIENT_EXCEPTIONS, with_retry
 
 from get_current_time import get_current_time
 from tool import Tool
@@ -93,9 +93,12 @@ class ToolExecutor:
             return f"错误: 不存在名为 {name} 的工具"
 
         try:
+            # 这里用默认的 openai 侧重试分类：工具内部若自己用了别的客户端（retrieval → rerank
+            # 走 requests），它在自己那层已经重试过了；这里再重试，尝试次数会变成相乘
             return with_retry(lambda: tool.run(**kwargs), what=f"工具 {name}")
-        except TRANSIENT_EXCEPTIONS as e:
-            # 临时错误能走到这里 = with_retry 已经退避重试用尽
+        except ALL_TRANSIENT_EXCEPTIONS as e:
+            # 临时错误能走到这里 = 某一层的 with_retry 已经退避重试用尽
+            # （这里用全集判断是为了"报告"准确，不是为了重试——见 retry.py 里该常量的注释）
             return f"工具执行出错（已重试多次仍未成功）: {type(e).__name__}: {e}"
         except Exception as e:
             # 永久性错误：with_retry 第一次就放行，没重试过，重试无意义，直接返回错误文字

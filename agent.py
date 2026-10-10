@@ -14,23 +14,31 @@ class Agent(ABC):
         self.system_prompt = system_prompt
         self.config = config or Config.from_env()
         # 历史统一用协议原生的字典表示（不再包装 Message 类）
-        self._history: list[dict] = []
+        self.messages: list[dict] = []
+        if system_prompt:
+            self.add_message({"role": "system", "content": system_prompt})
 
     @abstractmethod
     def run(self, input_text: str) -> str:
         pass
 
     def add_message(self, message: dict):
-        self._history.append(message)
+        self.messages.append(message)
         # 记忆管理：超过上限时裁掉最旧的消息
-        if len(self._history) > self.config.max_history_length:
-            self._history = self._history[-self.config.max_history_length:]
+        # if len(self._history) > self.config.max_history_length:
+        #     self._history = self._history[-self.config.max_history_length:]
 
     def clear_history(self):
-        self._history.clear()
+        self.messages = []
+        if self.system_prompt:
+            self.add_message({
+                "role": "system",
+                "content": self.system_prompt,
+            })
+
 
     def get_history(self) -> list[dict]:
-        return self._history.copy()
+        return self.messages.copy()
 
     def stream_with_config(self, messages: list[dict], config: Config | None = None):
         if config is None:

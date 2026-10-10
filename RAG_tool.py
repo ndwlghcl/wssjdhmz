@@ -9,7 +9,8 @@ from chunking_test import chunking
 from config import Config
 from llm import LLM
 from tool import tool
-
+import jieba
+from rank_bm25 import BM25Okapi
 
 # 只创建一个 LLM 客户端，全局复用
 config = Config.from_env()
@@ -41,7 +42,23 @@ def build_store(documents: list, batch_size: int = 10) -> list:
         texts = [d.page_content for d in batch]          # Document -> str
         resp = llm.embed(texts)   # 走 LLM.embed，临时错误自动重试
         # 按顺序把这一批的结果拼回 store，metadata 一起带上
-        for d, item in zip(batch, resp.data):
+        # for d, item in zip(batch, resp.data):
+        #     store.append({
+        #         "text": d.page_content,
+        #         "vector": item.embedding,
+        #         "metadata": d.metadata,
+        #     })
+
+        by_index = {item.index: item for item in resp.data}
+
+        if len(by_index) != len(texts):
+            # 宁可炸,也不要静默错位——这里炸掉是有价值的失败
+            raise RuntimeError(
+                f"embedding 返回条数不符:请求 {len(texts)} 条,返回 {len(by_index)} 条"
+            )
+
+        for j, d in enumerate(batch):
+            item = by_index[j]  # 用 index 显式取,不靠位置
             store.append({
                 "text": d.page_content,
                 "vector": item.embedding,
@@ -115,16 +132,24 @@ _INDEX = None
 
 
 def get_index() -> dict:
-    """惰性构建一次：store + 向量矩阵 (N, 1024) + 每行范数 (N,)"""
+    """惰性构建一次：store + 向量矩阵 (N, 1024) + 每行范数 (N,) + bm25"""
     global _INDEX
     if _INDEX is not None:
         return _INDEX
+
     store = get_store()
     matrix = np.array([item["vector"] for item in store])
+
+    document_words = [
+        jieba.lcut(item["text"].lower())
+        for item in store
+    ]
+
     _INDEX = {
         "store": store,
         "matrix": matrix,
-        "norms": np.linalg.norm(matrix, axis=1),   # 预计算每行长度，避免每次重复算
+        "norms": np.linalg.norm(matrix, axis=1),  # 预计算每行长度，避免每次重复算
+        "bm25": BM25Okapi(document_words),
     }
     return _INDEX
 
@@ -139,7 +164,7 @@ def score_all(query_vector: list) -> "np.ndarray":
 
 
 # ===== 检索参数（均为实测校准值，改语料后需重新校准）=====
-RECALL_N = 20              # 粗筛候选数：送去 rerank 的规模（rerank 的价值就在于能从更大的池子里捞回被余弦埋没的内容）
+RECALL_N = 20              # 每路召回上限：融合去重后最多 40 条交给 rerank
 RECALL_THRESHOLD = 0.4     # 粗筛阈值。实测：相关问题余弦 ≥0.589，无关问题 ≤0.260，取中间偏保守
 RERANK_THRESHOLD = 0.4     # 精排阈值。实测：相关问题 rerank ≥0.571，无关问题 ≤0.292，取中间偏保守
 
@@ -149,18 +174,57 @@ def retrieval(
     input: Annotated[str, "要检索的问题，必须是一句完整的问句，不要只给关键词"],
     top_k: Annotated[int, "返回的资料片段数量，默认 4，一般无需修改"] = 4,
 ) -> str:
-    store = get_index()["store"]      # D：用到时才确保索引已就绪
+    idx = get_index()      # 两路检索复用同一份索引，片段编号按 store 对齐
+    store = idx["store"]
     q_embedding = embed(input)
 
     # numpy 矩阵版：一次算完全库分数（替代原来"逐项 cosine + sorted"）
-    scores = score_all(q_embedding)
-    order = np.argsort(-scores)       # argsort 默认升序，取负号变降序
+    vector_scores = score_all(q_embedding)
+    vector_order = np.argsort(-vector_scores)       # argsort 默认升序，取负号变降序
+    vector_results = [
+        i for i in vector_order
+        if vector_scores[i] >= RECALL_THRESHOLD
+    ][:RECALL_N]
 
-    # ① 粗筛：多留候选（RECALL_N 条），把"精排"交给 rerank
+    bm25 = idx["bm25"]
+
+    bm25_scores = bm25.get_scores(jieba.lcut(input.lower()))
+
+    # 按分数排序，得到的是 chunk 编号
+    bm25_order = sorted(
+        range(len(store)),
+        key=lambda i: bm25_scores[i],
+        reverse=True,
+    )
+    bm25_results = [i for i in bm25_order if bm25_scores[i] > 0][:RECALL_N]
+
+    rrf_scores = {}
+
+    for rank, chunk_id in enumerate(vector_results, start=1):
+        contribution = 2 / (60 + rank)
+        rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0) + contribution
+
+    for rank, chunk_id in enumerate(bm25_results, start=1):
+        contribution = 1 / (60 + rank)
+        rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0) + contribution
+
+    fused_results = sorted(
+        rrf_scores.items(),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+
+
+    # ① 取融合后的候选：每项是 (片段编号, RRF 分数)。
+    # 余弦阈值已在向量路使用；此处保留 BM25 单独召回的片段。
+    # 保留两路并集：若再截成 20 条，2:1 权重会在向量路满额时排除所有 BM25 独有项。
     candidates = [
-        {"text": store[i]["text"], "metadata": store[i]["metadata"], "score": float(scores[i])}
-        for i in order[:RECALL_N]
-        if scores[i] >= RECALL_THRESHOLD
+        {
+            "text": store[chunk_id]["text"],
+            "metadata": store[chunk_id]["metadata"],
+            "rrf_score": float(rrf_score),
+        }
+        for chunk_id, rrf_score in fused_results
     ]
     if not candidates:
         return "知识库中没有找到与问题相关的内容。"
